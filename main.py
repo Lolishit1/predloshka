@@ -35,7 +35,7 @@ load_env()
 # ===================== SETTINGS =====================
 TOKEN = os.getenv("BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN")
 CHANNEL_ID = -1002223169314
-ADMIN_IDS = [1089153788, 1404025641]
+ADMIN_IDS = [1089153788, 1404025641, 6363879838]
 
 # ===================== LOGGING =====================
 logging.basicConfig(
