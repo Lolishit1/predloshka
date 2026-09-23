@@ -33,7 +33,15 @@ def load_env(path=".env"):
 load_env()
 
 # ===================== SETTINGS =====================
-TOKEN = os.getenv("BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN")
+def first_env(*names):
+    for name in names:
+        value = os.getenv(name)
+        if value:
+            return value
+    return None
+
+
+TOKEN = first_env("BOT_TOKEN", "TELEGRAM_BOT_TOKEN", "TELEGRAM_TOKEN", "TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL") or os.getenv("SUPABASE_DB_URL")
 CHANNEL_ID = -1002223169314
 ADMIN_IDS = [1089153788, 1404025641]
@@ -509,7 +517,10 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
 # ===================== MAIN =====================
 def main():
     if not TOKEN:
-        raise RuntimeError("Set BOT_TOKEN or TELEGRAM_BOT_TOKEN environment variable")
+        raise RuntimeError(
+            "Set Telegram bot token in Railway Variables: "
+            "BOT_TOKEN, TELEGRAM_BOT_TOKEN, TELEGRAM_TOKEN, or TOKEN"
+        )
 
     init_db()
     app = Application.builder().token(TOKEN).build()
@@ -534,3 +545,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
