@@ -34,8 +34,9 @@ load_env()
 
 # ===================== SETTINGS =====================
 TOKEN = os.getenv("BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN")
+DATABASE_URL = os.getenv("DATABASE_URL") or os.getenv("SUPABASE_DB_URL")
 CHANNEL_ID = -1002223169314
-ADMIN_IDS = [1089153788, 1404025641, 6363879838]
+ADMIN_IDS = [1089153788, 1404025641]
 
 # ===================== LOGGING =====================
 logging.basicConfig(
@@ -51,12 +52,83 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 logging.getLogger("apscheduler").setLevel(logging.WARNING)
 
 # ===================== DATABASE =====================
+def is_postgres():
+    return bool(DATABASE_URL)
+
+
+def postgres_url():
+    url = DATABASE_URL
+    if url.startswith("postgres://"):
+        url = "postgresql://" + url[len("postgres://"):]
+    if "sslmode=" not in url:
+        separator = "&" if "?" in url else "?"
+        url = f"{url}{separator}sslmode=require"
+    return url
+
+
+def sqlite_insert_ignore(sql):
+    if "ON CONFLICT" not in sql:
+        return sql
+
+    sql = re.sub(r"\s+ON CONFLICT(?:\s*\([^)]+\))?\s+DO NOTHING", "", sql, flags=re.IGNORECASE)
+    return re.sub(r"\bINSERT\s+INTO\b", "INSERT OR IGNORE INTO", sql, count=1, flags=re.IGNORECASE)
+
+
+class DbSession:
+    def __init__(self, conn, backend):
+        self.conn = conn
+        self.backend = backend
+
+    def execute(self, sql, params=()):
+        if self.backend == "postgres":
+            with self.conn.cursor() as cur:
+                cur.execute(sql.replace("?", "%s"), params)
+                if cur.description:
+                    return cur.fetchall()
+                return cur.rowcount
+
+        return self.conn.execute(sqlite_insert_ignore(sql), params)
+
+    def fetchone(self, sql, params=()):
+        if self.backend == "postgres":
+            with self.conn.cursor() as cur:
+                cur.execute(sql.replace("?", "%s"), params)
+                return cur.fetchone()
+
+        return self.conn.execute(sqlite_insert_ignore(sql), params).fetchone()
+
+    def fetchall(self, sql, params=()):
+        if self.backend == "postgres":
+            with self.conn.cursor() as cur:
+                cur.execute(sql.replace("?", "%s"), params)
+                return cur.fetchall()
+
+        return self.conn.execute(sqlite_insert_ignore(sql), params).fetchall()
+
+    def insert_returning_id(self, sql, params=()):
+        if self.backend == "postgres":
+            with self.conn.cursor() as cur:
+                cur.execute(f"{sql.replace('?', '%s')} RETURNING id", params)
+                return cur.fetchone()["id"]
+
+        cur = self.conn.execute(sqlite_insert_ignore(sql), params)
+        return cur.lastrowid
+
+
 @contextmanager
 def db():
-    conn = sqlite3.connect("proposals.db", check_same_thread=False)
-    conn.row_factory = sqlite3.Row
+    if is_postgres():
+        import psycopg2
+        from psycopg2.extras import RealDictCursor
+
+        conn = psycopg2.connect(postgres_url(), cursor_factory=RealDictCursor)
+        session = DbSession(conn, "postgres")
+    else:
+        conn = sqlite3.connect("proposals.db", check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        session = DbSession(conn, "sqlite")
     try:
-        yield conn
+        yield session
         conn.commit()
     except Exception:
         conn.rollback()
@@ -67,70 +139,102 @@ def db():
 
 def init_db():
     with db() as conn:
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS proposals (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER NOT NULL,
-                username TEXT,
-                proposal_type TEXT NOT NULL,
-                proposal_text TEXT,
-                file_id TEXT,
-                status TEXT DEFAULT 'pending',
-                is_anonymous INTEGER DEFAULT 0,
-                created_at TEXT NOT NULL
-            )
-        """)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS admins (
-                user_id INTEGER PRIMARY KEY
-            )
-        """)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS users (
-                user_id INTEGER PRIMARY KEY,
-                username TEXT,
-                first_seen TEXT NOT NULL
-            )
-        """)
+        if is_postgres():
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS proposals (
+                    id BIGSERIAL PRIMARY KEY,
+                    user_id BIGINT NOT NULL,
+                    username TEXT,
+                    proposal_type TEXT NOT NULL,
+                    proposal_text TEXT,
+                    file_id TEXT,
+                    status TEXT DEFAULT 'pending',
+                    is_anonymous BOOLEAN DEFAULT FALSE,
+                    created_at TEXT NOT NULL
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS admins (
+                    user_id BIGINT PRIMARY KEY
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS users (
+                    user_id BIGINT PRIMARY KEY,
+                    username TEXT,
+                    first_seen TEXT NOT NULL
+                )
+            """)
+        else:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS proposals (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    username TEXT,
+                    proposal_type TEXT NOT NULL,
+                    proposal_text TEXT,
+                    file_id TEXT,
+                    status TEXT DEFAULT 'pending',
+                    is_anonymous INTEGER DEFAULT 0,
+                    created_at TEXT NOT NULL
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS admins (
+                    user_id INTEGER PRIMARY KEY
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS users (
+                    user_id INTEGER PRIMARY KEY,
+                    username TEXT,
+                    first_seen TEXT NOT NULL
+                )
+            """)
         for admin in ADMIN_IDS:
-            conn.execute("INSERT OR IGNORE INTO admins(user_id) VALUES (?)", (admin,))
+            conn.execute("INSERT INTO admins(user_id) VALUES (?) ON CONFLICT DO NOTHING", (admin,))
 
 
 def get_admins():
     with db() as conn:
-        return [r["user_id"] for r in conn.execute("SELECT user_id FROM admins")]
+        return [r["user_id"] for r in conn.fetchall("SELECT user_id FROM admins")]
 
 
 def add_user(user_id, username):
     with db() as conn:
         conn.execute("""
-            INSERT OR IGNORE INTO users(user_id, username, first_seen)
+            INSERT INTO users(user_id, username, first_seen)
             VALUES (?, ?, ?)
+            ON CONFLICT (user_id) DO NOTHING
         """, (user_id, username or "", datetime.now(timezone.utc).isoformat()))
 
 
 def add_proposal(user_id, username, ptype, text=None, file_id=None):
     add_user(user_id, username)
     with db() as conn:
-        cur = conn.execute("""
+        return conn.insert_returning_id("""
             INSERT INTO proposals(user_id, username, proposal_type, proposal_text, file_id, created_at)
             VALUES (?, ?, ?, ?, ?, ?)
         """, (user_id, username or "", ptype, text, file_id, datetime.now(timezone.utc).isoformat()))
-        return cur.lastrowid
 
 
 def update_status(pid, status, anon=False):
     with db() as conn:
-        conn.execute("UPDATE proposals SET status=?, is_anonymous=? WHERE id=?", (status, int(anon), pid))
+        conn.execute(
+            "UPDATE proposals SET status=?, is_anonymous=? WHERE id=?",
+            (status, anon if is_postgres() else int(anon), pid)
+        )
 
 
 def claim_pending(pid, status, anon=False):
     with db() as conn:
-        cur = conn.execute(
+        rowcount = conn.execute(
             "UPDATE proposals SET status=?, is_anonymous=? WHERE id=? AND status='pending'",
-            (status, int(anon), pid)
+            (status, anon if is_postgres() else int(anon), pid)
         )
-        return cur.rowcount == 1
+        if hasattr(rowcount, "rowcount"):
+            rowcount = rowcount.rowcount
+        return rowcount == 1
 
 
 # ===================== KEYBOARDS =====================
@@ -169,10 +273,10 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or update.message.from_user.id not in get_admins():
         return
     with db() as conn:
-        total = conn.execute("SELECT COUNT(*) FROM proposals").fetchone()[0]
-        pend = conn.execute("SELECT COUNT(*) FROM proposals WHERE status='pending'").fetchone()[0]
-        app = conn.execute("SELECT COUNT(*) FROM proposals WHERE status='approved'").fetchone()[0]
-        rej = conn.execute("SELECT COUNT(*) FROM proposals WHERE status='rejected'").fetchone()[0]
+        total = conn.fetchone("SELECT COUNT(*) AS count FROM proposals")["count"]
+        pend = conn.fetchone("SELECT COUNT(*) AS count FROM proposals WHERE status='pending'")["count"]
+        app = conn.fetchone("SELECT COUNT(*) AS count FROM proposals WHERE status='approved'")["count"]
+        rej = conn.fetchone("SELECT COUNT(*) AS count FROM proposals WHERE status='rejected'")["count"]
     await update.message.reply_text(f"📊 Статистика\n\nВсего: {total}\n⏳ {pend}\n✅ {app}\n❌ {rej}")
 
 
@@ -207,9 +311,9 @@ async def list_pending(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     with db() as conn:
-        rows = conn.execute(
+        rows = conn.fetchall(
             "SELECT * FROM proposals WHERE status='pending' ORDER BY id ASC"
-        ).fetchall()
+        )
 
     if not rows:
         await update.message.reply_text("Ожидающих предложений нет.")
@@ -326,7 +430,7 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     pid = int(pid)
 
     with db() as conn:
-        p = conn.execute("SELECT * FROM proposals WHERE id=?", (pid,)).fetchone()
+        p = conn.fetchone("SELECT * FROM proposals WHERE id=?", (pid,))
 
     if not p or p["status"] != "pending":
         if q.message:
