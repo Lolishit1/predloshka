@@ -7,6 +7,7 @@ from contextlib import contextmanager
 from functools import partial
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlparse
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -41,8 +42,17 @@ def first_env(*names):
     return None
 
 
-TOKEN = first_env("BOT_TOKEN", "TELEGRAM_BOT_TOKEN", "TELEGRAM_TOKEN", "TOKEN")
-DATABASE_URL = os.getenv("DATABASE_URL") or os.getenv("SUPABASE_DB_URL")
+TOKEN_ENV_NAMES = (
+    "BOT_TOKEN",
+    "TELEGRAM_BOT_TOKEN",
+    "TELEGRAM_TOKEN",
+    "TG_BOT_TOKEN",
+    "BOT_API_TOKEN",
+    "API_TOKEN",
+    "TOKEN",
+)
+TOKEN = first_env(*TOKEN_ENV_NAMES)
+DATABASE_URL = first_env("SUPABASE_POOLER_URL", "DATABASE_URL", "SUPABASE_DB_URL")
 CHANNEL_ID = -1002223169314
 ADMIN_IDS = [1089153788, 1404025641]
 
@@ -68,6 +78,14 @@ def postgres_url():
     url = DATABASE_URL
     if url.startswith("postgres://"):
         url = "postgresql://" + url[len("postgres://"):]
+    parsed = urlparse(url)
+    if parsed.hostname and re.fullmatch(r"db\.[a-z0-9]+\.supabase\.co", parsed.hostname):
+        raise RuntimeError(
+            "Supabase direct database host is not supported on Railway because it can resolve to IPv6. "
+            "Use the Supabase connection pooler URL instead. In Supabase open "
+            "Project Settings -> Database -> Connection string -> Transaction pooler, then set it in "
+            "Railway Variables as SUPABASE_POOLER_URL or DATABASE_URL."
+        )
     if "sslmode=" not in url:
         separator = "&" if "?" in url else "?"
         url = f"{url}{separator}sslmode=require"
@@ -515,12 +533,23 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ===================== MAIN =====================
+def token_error_message():
+    visible_token_keys = sorted(
+        key for key in os.environ
+        if any(part in key.upper() for part in ("TOKEN", "BOT", "TELEGRAM"))
+    )
+    keys_text = ", ".join(visible_token_keys) if visible_token_keys else "none"
+    expected = ", ".join(TOKEN_ENV_NAMES)
+    return (
+        "Telegram bot token is missing. Add it in Railway service Variables. "
+        f"Accepted variable names: {expected}. "
+        f"Token-like variables visible in this container: {keys_text}."
+    )
+
+
 def main():
     if not TOKEN:
-        raise RuntimeError(
-            "Set Telegram bot token in Railway Variables: "
-            "BOT_TOKEN, TELEGRAM_BOT_TOKEN, TELEGRAM_TOKEN, or TOKEN"
-        )
+        raise RuntimeError(token_error_message())
 
     init_db()
     app = Application.builder().token(TOKEN).build()
