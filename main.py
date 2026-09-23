@@ -74,11 +74,26 @@ def is_postgres():
     return bool(DATABASE_URL)
 
 
-def postgres_url():
-    url = DATABASE_URL
+def normalize_database_url(url):
+    url = url.strip()
     if url.startswith("postgres://"):
         url = "postgresql://" + url[len("postgres://"):]
-    parsed = urlparse(url)
+
+    # Railway/Supabase URLs sometimes get pasted as @[host]:port. Brackets are
+    # valid only for IPv6 literals, not ordinary pooler hostnames.
+    url = re.sub(r"@\[([A-Za-z0-9.-]+)\](?=:\d+|/)", r"@\1", url)
+    return url
+
+
+def postgres_url():
+    url = normalize_database_url(DATABASE_URL)
+    try:
+        parsed = urlparse(url)
+    except ValueError as e:
+        raise RuntimeError(
+            "Invalid PostgreSQL URL. Check Railway variable SUPABASE_POOLER_URL/DATABASE_URL. "
+            "Use the Supabase Transaction pooler URL without square brackets around the host."
+        ) from e
     if parsed.hostname and re.fullmatch(r"db\.[a-z0-9]+\.supabase\.co", parsed.hostname):
         raise RuntimeError(
             "Supabase direct database host is not supported on Railway because it can resolve to IPv6. "
