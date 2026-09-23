@@ -82,6 +82,7 @@ def normalize_database_url(url):
     # Railway/Supabase URLs sometimes get pasted as @[host]:port. Brackets are
     # valid only for IPv6 literals, not ordinary pooler hostnames.
     url = re.sub(r"@\[([A-Za-z0-9.-]+)\](?=:\d+|/)", r"@\1", url)
+    url = re.sub(r"\[([A-Za-z0-9.-]*pooler\.supabase\.com)\]", r"\1", url, flags=re.IGNORECASE)
     return url
 
 
