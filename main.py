@@ -7,7 +7,7 @@ from contextlib import contextmanager
 from functools import partial
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import quote, unquote, urlparse
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -81,9 +81,31 @@ def normalize_database_url(url):
 
     # Railway/Supabase URLs sometimes get pasted as @[host]:port. Brackets are
     # valid only for IPv6 literals, not ordinary pooler hostnames.
+    url = url.replace(r"\_", "_").replace(r"\@", "@")
     url = re.sub(r"@\[([A-Za-z0-9.-]+)\](?=:\d+|/)", r"@\1", url)
     url = re.sub(r"\[([A-Za-z0-9.-]*pooler\.supabase\.com)\]", r"\1", url, flags=re.IGNORECASE)
+    url = encode_database_url_userinfo(url)
     return url
+
+
+def encode_database_url_userinfo(url):
+    scheme_match = re.match(r"^([A-Za-z][A-Za-z0-9+.-]*://)(.+)$", url)
+    if not scheme_match:
+        return url
+
+    scheme, rest = scheme_match.groups()
+    authority, separator, tail = rest.partition("/")
+    if "@" not in authority:
+        return url
+
+    userinfo, hostinfo = authority.rsplit("@", 1)
+    if ":" in userinfo:
+        username, password = userinfo.split(":", 1)
+        userinfo = f"{quote(unquote(username), safe='')}:{quote(unquote(password), safe='')}"
+    else:
+        userinfo = quote(unquote(userinfo), safe="")
+
+    return f"{scheme}{userinfo}@{hostinfo}{separator}{tail}"
 
 
 def postgres_url():
